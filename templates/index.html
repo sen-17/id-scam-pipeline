@@ -152,7 +152,11 @@
     <section class="workspace" aria-label="Area review screenshot">
       <div>
         <div class="section-label">
-          <h2>Review Queue</h2>
+          <h2>Review Queue <span id="filterSummary" class="batch-total tabular"></span></h2>
+          <div class="filter-group" role="group" aria-label="Filter kategori review">
+            <button id="btnFilterAll" type="button" class="filter-pill active" data-filter="all">Semua</button>
+            <button id="btnFilterIllegal" type="button" class="filter-pill" data-filter="illegal">Ilegal Saja</button>
+          </div>
         </div>
         <div id="gallery" class="gallery" aria-label="Galeri screenshot situs"></div>
       </div>

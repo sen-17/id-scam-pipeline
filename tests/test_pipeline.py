@@ -378,6 +378,8 @@ class TestAppAtomicExport(unittest.TestCase):
         self.assertIn("Auto Pipeline", html.text)
         self.assertIn("Mulai Otomatis", html.text)
         self.assertIn('id="btnTheme"', html.text)
+        self.assertIn('id="btnFilterIllegal"', html.text)
+        self.assertIn("Ilegal Saja", html.text)
         self.assertIn('href="/static/styles.css?v=', html.text)
         self.assertIn('src="/static/app.js?v=', html.text)
 

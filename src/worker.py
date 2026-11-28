@@ -243,13 +243,22 @@ async def run_reverify_approved_pass(
     }
 
 
+_PIVOT_SKIP_SUFFIXES = (".ac.id", ".go.id", ".sch.id", ".desa.id", ".or.id", ".mil.id")
+_PIVOT_ILLEGAL_CATEGORIES = frozenset({"judol", "pinjol", "phishing", "scam"})
+
+
 async def run_triage_pass(
     db: Any,
     *,
     batch_size: int = DEFAULT_TRIAGE_BATCH,
     ai_client: Optional[Any] = None,
+    auto_pivot: bool = False,
+    pivot_min_confidence: float = 0.90,
+    pivot_max_seeds: int = 2,
+    pivot_max_candidates: int = 16,
+    pivot_fn: Optional[Callable[..., Any]] = None,
 ) -> Dict[str, Any]:
-    """Classify verified URLs via DeepSeek API if configured (fail-open if key is missing)."""
+    """Classify verified URLs via AI API (fail-open) and optionally DNS-pivot high-confidence hits."""
     from src.ai_triage import create_deepseek_client, triage_site
 
     load_dotenv()
@@ -268,11 +277,13 @@ async def run_triage_pass(
 
     processed = 0
     errors = 0
+    pivot_seeds: list[tuple[str, str]] = []
     for row in rows:
         try:
+            target_norm = str(row.get("final_normalized_url") or row.get("normalized_url") or "")
             res = await asyncio.to_thread(
                 triage_site,
-                str(row.get("final_normalized_url") or row.get("normalized_url") or ""),
+                target_norm,
                 str(row.get("page_title") or ""),
                 str(row.get("clean_text") or ""),
                 client=ai_client,
@@ -287,11 +298,60 @@ async def run_triage_pass(
                 ai_note=res.reason_140,
             )
             processed += 1
+            if (
+                auto_pivot
+                and len(pivot_seeds) < pivot_max_seeds
+                and res.category in _PIVOT_ILLEGAL_CATEGORIES
+                and res.confidence >= pivot_min_confidence
+            ):
+                host = target_norm.split("/", 1)[0].lower()
+                if host and not host.endswith(_PIVOT_SKIP_SUFFIXES):
+                    pivot_seeds.append((host, res.category))
         except Exception as exc:
             errors += 1
             print(f"[worker:triage] id={row['id']} error: {exc}", file=sys.stderr, flush=True)
 
-    return {"stage": "triage", "processed": processed, "errors": errors}
+    result: Dict[str, Any] = {"stage": "triage", "processed": processed, "errors": errors}
+    if auto_pivot:
+        pivoted_inserted = 0
+        if pivot_seeds:
+            if pivot_fn is None:
+                from src.dns_pivot import expand_from_seed
+                pivot_caller = expand_from_seed
+            else:
+                pivot_caller = pivot_fn
+
+            pivot_rows: list[dict[str, Any]] = []
+            for seed_host, seed_cat in pivot_seeds:
+                try:
+                    siblings = await asyncio.wait_for(
+                        pivot_caller(
+                            seed_host,
+                            number_window=4,
+                            max_candidates=pivot_max_candidates,
+                            timeout_s=2.5,
+                            concurrency=8,
+                            verbose=False,
+                        ),
+                        timeout=15.0,
+                    )
+                except Exception as exc:
+                    print(f"[worker:pivot] seed={seed_host} error: {exc}", file=sys.stderr, flush=True)
+                    continue
+                for sib in siblings:
+                    pivot_rows.append(
+                        {
+                            "raw_url": f"https://{sib.normalized_url}",
+                            "source": "dns_pivot",
+                            "ai_category": seed_cat,
+                            "ai_note": f"DNS pivot from {seed_host}"[:140],
+                        }
+                    )
+            if pivot_rows:
+                inserted = await asyncio.to_thread(db.insert_urls, pivot_rows, "dns_pivot", "new")
+                pivoted_inserted = len(inserted)
+        result["pivoted_inserted"] = pivoted_inserted
+    return result
 
 
 async def _loop(
@@ -351,7 +411,7 @@ async def _loop(
             if mode in ("triage", "all"):
                 try:
                     summary = await asyncio.wait_for(
-                        run_triage_pass(db),
+                        run_triage_pass(db, auto_pivot=True),
                         timeout=90.0,
                     )
                     print(json.dumps({"cycle": cycle, **summary}), flush=True)

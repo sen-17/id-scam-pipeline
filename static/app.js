@@ -6,6 +6,7 @@
     batches: [],
     lastExportBatchId: null,
     selectedIndex: -1,
+    filterMode: localStorage.getItem("gallery_filter") || "all",
     busy: false,
     autoLoop: false,
     autoRunning: false,
@@ -64,6 +65,9 @@
     zoomModal: document.getElementById("zoomModal"),
     zoomImg: document.getElementById("zoomImg"),
     toast: document.getElementById("toast"),
+    filterSummary: document.getElementById("filterSummary"),
+    btnFilterAll: document.getElementById("btnFilterAll"),
+    btnFilterIllegal: document.getElementById("btnFilterIllegal"),
   };
 
   /* Helpers */
@@ -114,8 +118,17 @@
   }
   els.noteInput.addEventListener("input", updateNoteCounter);
 
+  function visibleItems() {
+    if (state.filterMode !== "illegal") return state.items;
+    return state.items.filter((item) => {
+      const cat = String(item.ai_category || "").toLowerCase();
+      return cat !== "benign" && cat !== "legit";
+    });
+  }
+
   function currentItem() {
-    return state.items[state.selectedIndex] || null;
+    const list = visibleItems();
+    return list[state.selectedIndex] || null;
   }
 
   async function copyText(text) {
@@ -527,15 +540,30 @@
   }
 
   /* Review Gallery & Inspector */
+  function syncFilterUi() {
+    if (els.btnFilterAll) els.btnFilterAll.classList.toggle("active", state.filterMode === "all");
+    if (els.btnFilterIllegal) els.btnFilterIllegal.classList.toggle("active", state.filterMode === "illegal");
+    if (els.filterSummary) {
+      const shown = visibleItems().length;
+      const hidden = Math.max(0, state.items.length - shown);
+      els.filterSummary.textContent = hidden > 0 ? `${shown} tampil · ${hidden} benign disembunyikan` : "";
+    }
+  }
+
   function renderGallery() {
-    if (!state.items.length) {
-      els.gallery.innerHTML = `<div class="empty-state">Antrean review kosong. Jalankan <strong>Auto Pipeline</strong> atau <strong>Browser Capture</strong> di atas.</div>`;
+    syncFilterUi();
+    const list = visibleItems();
+    if (!list.length) {
+      const msg = state.items.length
+        ? `Semua ${state.items.length} situs saat ini berkategori benign. Klik <strong>Semua</strong> untuk menampilkannya.`
+        : `Antrean review kosong. Jalankan <strong>Auto Pipeline</strong> atau <strong>Browser Capture</strong> di atas.`;
+      els.gallery.innerHTML = `<div class="empty-state">${msg}</div>`;
       renderInspector();
       return;
     }
 
     const me = getReviewer();
-    els.gallery.innerHTML = state.items.map((item, idx) => {
+    els.gallery.innerHTML = list.map((item, idx) => {
       const active = idx === state.selectedIndex ? "active" : "";
       const lockedOther = item.locked_by && item.locked_by !== me ? "locked-other" : "";
       const cat = item.ai_category || "unsure";
@@ -606,7 +634,8 @@
   }
 
   async function lockCard(idx) {
-    const item = state.items[idx];
+    const list = visibleItems();
+    const item = list[idx];
     if (!item) return;
     try {
       const { res, data } = await postJson("/api/review/lock", {
@@ -618,7 +647,8 @@
         return;
       }
       if (res.ok && data.locked) {
-        state.items[idx] = { ...item, ...data.locked };
+        const masterIdx = state.items.findIndex((r) => r.id === item.id);
+        if (masterIdx !== -1) state.items[masterIdx] = { ...item, ...data.locked };
         renderGallery();
       }
     } catch (err) {
@@ -627,12 +657,13 @@
   }
 
   async function selectIndex(idx, shouldLock = true) {
-    if (!state.items.length) {
+    const list = visibleItems();
+    if (!list.length) {
       state.selectedIndex = -1;
       renderGallery();
       return;
     }
-    state.selectedIndex = Math.max(0, Math.min(idx, state.items.length - 1));
+    state.selectedIndex = Math.max(0, Math.min(idx, list.length - 1));
     renderGallery();
     if (shouldLock) await lockCard(state.selectedIndex);
   }
@@ -647,7 +678,8 @@
       const data = await res.json();
       state.items = data.items || [];
       renderCounts(data.counts);
-      await selectIndex(state.items.length ? 0 : -1, state.items.length > 0);
+      const list = visibleItems();
+      await selectIndex(list.length ? 0 : -1, list.length > 0);
     } catch (err) {
       showToast(`Gagal memuat antrean: ${err.message}`);
     }
@@ -667,7 +699,8 @@
       const label = action === "skip" ? "Skipped" : (action === "approve_note" ? "Approved + Note" : "Approved");
       showToast(`${label}: ${item.normalized_url}`);
 
-      state.items.splice(state.selectedIndex, 1);
+      const masterIdx = state.items.findIndex((r) => r.id === item.id);
+      if (masterIdx !== -1) state.items.splice(masterIdx, 1);
       els.cntQueue.textContent = String(Math.max(0, Number(els.cntQueue.textContent) - 1));
       if (action === "skip") {
         els.cntSkipped.textContent = String(Number(els.cntSkipped.textContent) + 1);
@@ -675,7 +708,8 @@
         els.cntApproved.textContent = String(Number(els.cntApproved.textContent) + 1);
       }
       els.noteInput.blur();
-      await selectIndex(Math.min(state.selectedIndex, state.items.length - 1), state.items.length > 0);
+      const nextList = visibleItems();
+      await selectIndex(Math.min(state.selectedIndex, nextList.length - 1), nextList.length > 0);
     } catch (err) {
       showToast(`Gagal menyimpan: ${err.message}`);
     } finally {
@@ -839,6 +873,15 @@
   document.getElementById("btnTriageApi").addEventListener("click", runTriageApi);
   document.getElementById("btnTriageExport").addEventListener("click", runTriageExportPrompts);
   document.getElementById("btnTriageImport").addEventListener("click", runTriageImport);
+  function setFilterMode(mode) {
+    state.filterMode = mode === "illegal" ? "illegal" : "all";
+    localStorage.setItem("gallery_filter", state.filterMode);
+    const list = visibleItems();
+    selectIndex(list.length ? 0 : -1, false);
+  }
+  if (els.btnFilterAll) els.btnFilterAll.addEventListener("click", () => setFilterMode("all"));
+  if (els.btnFilterIllegal) els.btnFilterIllegal.addEventListener("click", () => setFilterMode("illegal"));
+
   document.getElementById("btnRefresh").addEventListener("click", () => Promise.all([loadQueue(), loadBatches()]));
   document.getElementById("btnRefreshBatches").addEventListener("click", loadBatches);
   document.getElementById("btnExport").addEventListener("click", exportNext20);

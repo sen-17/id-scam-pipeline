@@ -217,6 +217,68 @@ class TestAutomatedWorker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.rows[0]["final_normalized_url"], "masihhidup88.xyz/promo")
         self.assertEqual(db.rows[1]["status"], "dead_or_blocked")
 
+    async def test_triage_auto_pivot_expands_high_conf_illegal_and_skips_ac_id(self):
+        db = _MemoryWorkerDB()
+        db.rows = [
+            {
+                "id": 1,
+                "raw_url": "https://slotbaru88.xyz",
+                "normalized_url": "slotbaru88.xyz",
+                "final_normalized_url": "slotbaru88.xyz",
+                "status": "verified",
+                "page_title": "Slot Baru 88",
+                "clean_text": "Daftar slot deposit qris",
+            },
+            {
+                "id": 2,
+                "raw_url": "https://kampus.ac.id/slot-gacor",
+                "normalized_url": "kampus.ac.id/slot-gacor",
+                "final_normalized_url": "kampus.ac.id/slot-gacor",
+                "status": "verified",
+                "page_title": "Slot Kampus",
+                "clean_text": "Slot gacor maxwin",
+            },
+        ]
+        db.next_id = 3
+
+        fake_resp = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "category": "judol",
+                                "confidence": 0.96,
+                                "reason_140": "Situs slot online aktif.",
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+
+        class _FakeCompletions:
+            def create(self, **kwargs):
+                return fake_resp
+
+        fake_ai = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+        pivoted_seeds: list[str] = []
+
+        async def fake_pivot(seed_host: str, **kwargs):
+            pivoted_seeds.append(seed_host)
+            return [SimpleNamespace(normalized_url="slotbaru89.xyz")]
+
+        summary = await run_triage_pass(
+            db,
+            ai_client=fake_ai,
+            auto_pivot=True,
+            pivot_fn=fake_pivot,
+        )
+        self.assertEqual(summary["processed"], 2)
+        self.assertEqual(summary["pivoted_inserted"], 1)
+        self.assertEqual(pivoted_seeds, ["slotbaru88.xyz"])
+        self.assertTrue(any(r["normalized_url"] == "slotbaru89.xyz" and r["source"] == "dns_pivot" for r in db.rows))
+
 
 if __name__ == "__main__":
     unittest.main()
